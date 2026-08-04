@@ -1,6 +1,7 @@
 import Image, { type ImageProps } from "next/image";
 import { Button } from "@repo/ui/button";
 import styles from "./page.module.css";
+import { formatDate } from "@myapp/utils"
 
 type Props = Omit<ImageProps, "src"> & {
   srcLight: string;
@@ -14,6 +15,7 @@ const ThemeImage = (props: Props) => {
     <>
       <Image {...rest} src={srcLight} className="imgLight" />
       <Image {...rest} src={srcDark} className="imgDark" />
+      <p>{formatDate(new Date())}</p>
     </>
   );
 };
