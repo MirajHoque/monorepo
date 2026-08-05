@@ -1,0 +1,184 @@
+name: Monorepo CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ==========================================
+  # 1. CI: VALIDATE ALL AFFECTED PACKAGES
+  # ==========================================
+  ci:
+    name: Lint, Test & Build (Affected Only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code with Complete History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. Setup pnpm first so setup-node can detect its cache
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # 2. Setup Node.js using pnpm cache
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      # 3. Strict lockfile install for CI
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run CI on Affected Applications
+        run: npx turbo run lint test build --affected
+
+  # ==========================================
+  # 2. CD: DEPLOY WEB APP TO EC2 (Conditional)
+  # ==========================================
+  
+  deploy-web:
+    name: CD - Deploy Web
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required to request the OIDC token for AWS
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check if 'web' or its shared dependencies changed
+        id: check-web
+        run: |
+          TASKS=$(npx turbo run build --filter="web...[HEAD^1]" --dry=json | jq '.tasks | length')
+          echo "Tasks triggered for web: $TASKS"
+          if [ "$TASKS" -gt "0" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials via OIDC
+        if: steps.check-web.outputs.deploy == 'true' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy to EC2 via SSM Run Command
+        if: steps.check-web.outputs.deploy == 'true' && vars.AWS_ROLE_ARN != ''
+        run: |
+          aws ssm send-command \
+            --instance-ids "${{ vars.EC2_WEB_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["cd /opt/web && git pull && corepack pnpm install --frozen-lockfile && pnpm turbo run build --filter=web && pm2 restart web"]}'
+
+      - name: Simulate deploy (no AWS account configured yet)
+        if: steps.check-web.outputs.deploy == 'true' && vars.AWS_ROLE_ARN == ''
+        run: |
+          echo "SIMULATED DEPLOY - set vars.AWS_ROLE_ARN/AWS_REGION/EC2_WEB_INSTANCE_ID to go live"
+          echo "1. Would request an OIDC token and assume IAM role: <AWS_ROLE_ARN>"
+          echo "2. Would call: aws ssm send-command --instance-ids <EC2_WEB_INSTANCE_ID> \\"
+          echo "     --document-name AWS-RunShellScript \\"
+          echo "     --parameters commands='cd /opt/web && git pull && pnpm install --frozen-lockfile && pnpm turbo run build --filter=web && pm2 restart web'"
+          echo "No AWS API was called. No cost was incurred."
+
+      - name: Skip Web Deployment
+        if: steps.check-web.outputs.deploy == 'false'
+        run: echo "No changes in 'web' or its dependencies. Deployment skipped."
+
+  # ==========================================
+  # 3. CD: DEPLOY DOCS APP TO EC2 (Conditional)
+  # ==========================================
+  
+  deploy-docs:
+    name: CD - Deploy Docs
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check if 'docs' or its shared dependencies changed
+        id: check-docs
+        run: |
+          TASKS=$(npx turbo run build --filter="docs...[HEAD^1]" --dry=json | jq '.tasks | length')
+          echo "Tasks triggered for docs: $TASKS"
+          if [ "$TASKS" -gt "0" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials via OIDC
+        if: steps.check-docs.outputs.deploy == 'true' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy to EC2 via SSM Run Command
+        if: steps.check-docs.outputs.deploy == 'true' && vars.AWS_ROLE_ARN != ''
+        run: |
+          aws ssm send-command \
+            --instance-ids "${{ vars.EC2_DOCS_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["cd /opt/docs && git pull && corepack pnpm install --frozen-lockfile && pnpm turbo run build --filter=docs && pm2 restart docs"]}'
+
+      - name: Simulate deploy (no AWS account configured yet)
+        if: steps.check-docs.outputs.deploy == 'true' && vars.AWS_ROLE_ARN == ''
+        run: |
+          echo "SIMULATED DEPLOY - set vars.AWS_ROLE_ARN/AWS_REGION/EC2_DOCS_INSTANCE_ID to go live"
+          echo "1. Would request an OIDC token and assume IAM role: <AWS_ROLE_ARN>"
+          echo "2. Would call: aws ssm send-command --instance-ids <EC2_DOCS_INSTANCE_ID> \\"
+          echo "     --document-name AWS-RunShellScript \\"
+          echo "     --parameters commands='cd /opt/docs && git pull && pnpm install --frozen-lockfile && pnpm turbo run build --filter=docs && pm2 restart docs'"
+          echo "No AWS API was called. No cost was incurred."
+
+      - name: Skip Docs Deployment
+        if: steps.check-docs.outputs.deploy == 'false'
+        run: echo "No changes in 'docs' or its dependencies. Deployment skipped."
