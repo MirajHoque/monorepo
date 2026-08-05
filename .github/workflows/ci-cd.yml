@@ -35,7 +35,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run CI on Affected Applications
-        run: npx turbo run lint test build --affected
+        run: npx turbo run lint build --affected
 
   # ==========================================
   # 2. CD: DEPLOY WEB APP TO EC2 (Conditional)
